@@ -1,0 +1,171 @@
+name: Build libbox.aar with OneRing
+
+on:
+  push:
+    branches: [ reF1nd-stable ]
+    paths:
+      - 'common/onering/**'
+      - 'transport/v2raywebsocket/**'
+      - 'transport/v2rayhttpupgrade/**'
+      - 'experimental/libbox/**'
+      - '.github/workflows/build-libbox-onering.yml'
+  workflow_dispatch:
+
+jobs:
+  build-libbox:
+    strategy:
+      matrix:
+        include:
+          - name: arm64
+            goos: android
+            goarch: arm64
+            ndk: aarch64-linux-android
+            ndk_abi: arm64-v8a
+          - name: arm
+            goos: android
+            goarch: arm
+            ndk: armv7a-linux-androideabi
+            ndk_abi: armeabi-v7a
+          - name: amd64
+            goos: android
+            goarch: amd64
+            ndk: x86_64-linux-android
+            ndk_abi: x86_64
+          - name: 386
+            goos: android
+            goarch: 386
+            ndk: i686-linux-android
+            ndk_abi: x86
+    
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout sing-box
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.12'
+          cache: true
+      
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28
+          add-to-path: true
+      
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+      
+      - name: Build libbox for ${{ matrix.name }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CC: ${{ matrix.ndk }}21-clang
+          CGO_ENABLED: 1
+        run: |
+          export PATH=$PATH:$(go env GOPATH)/bin
+          gomobile bind -v \
+            -androidapi 21 \
+            -target=android/${{ matrix.goarch }} \
+            -o libbox-${{ matrix.name }}.aar \
+            github.com/sagernet/sing-box/experimental/libbox
+      
+      - name: Verify AAR
+        run: |
+          ls -lh libbox-${{ matrix.name }}.aar
+          unzip -l libbox-${{ matrix.name }}.aar | head -20
+      
+      - name: Upload libbox-${{ matrix.name }}.aar
+        uses: actions/upload-artifact@v4
+        with:
+          name: libbox-${{ matrix.name }}
+          path: libbox-${{ matrix.name }}.aar
+          retention-days: 7
+  
+  merge-aar:
+    needs: build-libbox
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Download all AAR artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      
+      - name: Merge multi-arch AAR
+        run: |
+          mkdir -p merged/jni
+          
+          # Copy JNI libs from all architectures
+          for arch in arm64 arm amd64 386; do
+            echo "Processing libbox-${arch}.aar..."
+            unzip -q artifacts/libbox-${arch}/libbox-${arch}.aar -d temp-${arch}
+            
+            # Copy JNI libs with correct structure
+            if [ -d "temp-${arch}/jni" ]; then
+              cp -rv temp-${arch}/jni/* merged/jni/
+            fi
+            
+            # Copy classes.jar from first arch (they're identical)
+            if [ "$arch" = "arm64" ]; then
+              cp temp-${arch}/classes.jar merged/
+              cp temp-${arch}/AndroidManifest.xml merged/
+              [ -f temp-${arch}/R.txt ] && cp temp-${arch}/R.txt merged/
+              [ -f temp-${arch}/proguard.txt ] && cp temp-${arch}/proguard.txt merged/
+            fi
+            
+            rm -rf temp-${arch}
+          done
+          
+          # List merged structure
+          echo "Merged AAR structure:"
+          find merged -type f
+          
+          # Package merged AAR
+          cd merged
+          zip -r ../libbox.aar .
+          cd ..
+          
+          ls -lh libbox.aar
+          unzip -l libbox.aar
+      
+      - name: Upload merged libbox.aar
+        uses: actions/upload-artifact@v4
+        with:
+          name: libbox-merged
+          path: libbox.aar
+          retention-days: 30
+      
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: libbox.aar
+          tag_name: ${{ github.ref_name }}
+          body: |
+            ## libbox.aar with OneRing Support
+            
+            Built from commit: ${{ github.sha }}
+            
+            ### Features
+            - ✅ OneRing bypass technique
+            - ✅ Multi-architecture support (arm64, arm, x86_64, x86)
+            - ✅ All critical bugs fixed
+            
+            ### Architectures
+            - arm64-v8a (64-bit ARM)
+            - armeabi-v7a (32-bit ARM)
+            - x86_64 (64-bit x86)
+            - x86 (32-bit x86)
