@@ -135,11 +135,12 @@ func (c *WebsocketConn) Upstream() any {
 
 type EarlyWebsocketConn struct {
 	*Client
-	ctx    context.Context
-	conn   atomic.Pointer[WebsocketConn]
-	access sync.Mutex
-	create chan struct{}
-	err    error
+	ctx        context.Context
+	conn       atomic.Pointer[WebsocketConn]
+	access     sync.Mutex
+	create     chan struct{}
+	createOnce sync.Once
+	err        error
 }
 
 func (c *EarlyWebsocketConn) Read(b []byte) (n int, err error) {
@@ -150,6 +151,9 @@ func (c *EarlyWebsocketConn) Read(b []byte) (n int, err error) {
 			return 0, c.err
 		}
 		conn = c.conn.Load()
+		if conn == nil {
+			return 0, net.ErrClosed
+		}
 	}
 	return wrapWsError0(conn.Read(b))
 }
@@ -211,7 +215,7 @@ func (c *EarlyWebsocketConn) Write(b []byte) (n int, err error) {
 	}
 	err = c.writeRequest(b)
 	c.err = err
-	close(c.create)
+	c.createOnce.Do(func() { close(c.create) })
 	if err != nil {
 		return
 	}
@@ -234,11 +238,20 @@ func (c *EarlyWebsocketConn) WriteBuffer(buffer *buf.Buffer) error {
 	}
 	err := c.writeRequest(buffer.Bytes())
 	c.err = err
-	close(c.create)
+	c.createOnce.Do(func() { close(c.create) })
 	return err
 }
 
 func (c *EarlyWebsocketConn) Close() error {
+	c.access.Lock()
+	defer c.access.Unlock()
+	
+	// Close channel to unblock Read()
+	c.createOnce.Do(func() {
+		c.err = net.ErrClosed
+		close(c.create)
+	})
+	
 	conn := c.conn.Load()
 	if conn == nil {
 		return nil

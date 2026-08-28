@@ -3,12 +3,13 @@ package v2rayhttpupgrade
 import (
 	std_bufio "bufio"
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/onering"
 	"github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/buf"
@@ -16,59 +17,58 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
-	sHTTP "github.com/sagernet/sing/protocol/http"
 )
 
 var _ adapter.V2RayClientTransport = (*Client)(nil)
 
 type Client struct {
-	dialer     N.Dialer
-	serverAddr M.Socksaddr
-	requestURL url.URL
-	headers    http.Header
-	host       string
+	dialer        N.Dialer
+	serverAddr    M.Socksaddr
+	host          string
+	path          string
+	headers       http.Header
+	oneringConfig *onering.Config
 }
 
-func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, options option.V2RayHTTPUpgradeOptions, tlsConfig tls.Config) (*Client, error) {
+func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, options option.V2RayHTTPUpgradeOptions, tlsConfig tls.Config) (adapter.V2RayClientTransport, error) {
+	// Parse OneRing config from TLS ServerName if available
+	var oneringCfg *onering.Config
 	if tlsConfig != nil {
-		if len(tlsConfig.NextProtos()) == 0 {
-			tlsConfig.SetNextProtos([]string{"http/1.1"})
+		serverName := tlsConfig.ServerName()
+		if serverName != "" {
+			cfg, err := onering.Parse(serverName)
+			if err == nil && cfg.Enabled {
+				oneringCfg = cfg
+				// Override TLS ServerName with bug domain
+				tlsConfig.SetServerName(cfg.GetTLSSNI())
+			}
 		}
 		dialer = tls.NewDialer(dialer, tlsConfig)
 	}
-	var host string
-	if options.Host != "" {
-		host = options.Host
-	} else if tlsConfig != nil && tlsConfig.ServerName() != "" {
-		host = tlsConfig.ServerName()
-	} else {
-		host = serverAddr.String()
+
+	// Override serverAddr if OneRing is enabled
+	actualServerAddr := serverAddr
+	if oneringCfg != nil && oneringCfg.Enabled {
+		bugDomain := oneringCfg.GetDialAddress()
+		actualServerAddr = M.ParseSocksaddr(fmt.Sprintf("%s:%d", bugDomain, serverAddr.Port))
 	}
-	var requestURL url.URL
-	if tlsConfig == nil {
-		requestURL.Scheme = "http"
-	} else {
-		requestURL.Scheme = "https"
+
+	// Determine host header
+	host := options.Host
+	if oneringCfg != nil && oneringCfg.Enabled {
+		// Use real domain for Host header
+		host = oneringCfg.GetHTTPHost()
+	} else if host == "" {
+		host = serverAddr.AddrString()
 	}
-	requestURL.Host = serverAddr.String()
-	requestURL.Path = options.Path
-	err := sHTTP.URLSetPath(&requestURL, options.Path)
-	if err != nil {
-		return nil, E.Cause(err, "parse path")
-	}
-	if !strings.HasPrefix(requestURL.Path, "/") {
-		requestURL.Path = "/" + requestURL.Path
-	}
-	headers := make(http.Header)
-	for key, value := range options.Headers {
-		headers[key] = value
-	}
+
 	return &Client{
-		dialer:     dialer,
-		serverAddr: serverAddr,
-		requestURL: requestURL,
-		headers:    headers,
-		host:       host,
+		dialer:        dialer,
+		serverAddr:    actualServerAddr,
+		host:          host,
+		path:          options.Path,
+		headers:       options.Headers.Build(),
+		oneringConfig: oneringCfg,
 	}, nil
 }
 
@@ -77,41 +77,50 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	request := &http.Request{
 		Method: http.MethodGet,
-		URL:    &c.requestURL,
+		URL: &url.URL{
+			Scheme: "http",
+			Host:   c.host,
+			Path:   c.path,
+		},
 		Header: c.headers.Clone(),
 		Host:   c.host,
 	}
 	request.Header.Set("Connection", "Upgrade")
 	request.Header.Set("Upgrade", "websocket")
+
 	err = request.Write(conn)
 	if err != nil {
 		conn.Close()
 		return nil, err
 	}
-	bufReader := std_bufio.NewReader(conn)
-	response, err := http.ReadResponse(bufReader, request)
+
+	reader := std_bufio.NewReader(conn)
+	response, err := http.ReadResponse(reader, request)
 	if err != nil {
 		conn.Close()
 		return nil, err
 	}
-	if response.StatusCode != 101 ||
-		!strings.EqualFold(response.Header.Get("Connection"), "upgrade") ||
-		!strings.EqualFold(response.Header.Get("Upgrade"), "websocket") {
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusSwitchingProtocols {
 		conn.Close()
-		response.Body.Close()
-		return nil, E.New("v2ray-http-upgrade: unexpected status: ", response.Status)
+		return nil, E.New("unexpected status: ", response.Status)
 	}
-	if bufReader.Buffered() > 0 {
-		buffer := buf.NewSize(bufReader.Buffered())
-		_, err = buffer.ReadFullFrom(bufReader, buffer.Len())
+
+	// Handle buffered data
+	if reader.Buffered() > 0 {
+		buffer := buf.NewSize(reader.Buffered())
+		_, err = buffer.ReadFullFrom(reader, buffer.FreeLen())
 		if err != nil {
 			conn.Close()
 			return nil, err
 		}
 		conn = bufio.NewCachedConn(conn, buffer)
 	}
+
 	return conn, nil
 }
 

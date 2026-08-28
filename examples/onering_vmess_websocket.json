@@ -1,0 +1,37 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 1080
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "vmess",
+      "tag": "vmess-onering",
+      "server": "your-server.com",
+      "server_port": 443,
+      "uuid": "your-uuid-here",
+      "security": "auto",
+      "alter_id": 0,
+      "global_padding": false,
+      "authenticated_length": true,
+      "network": "tcp",
+      "tls": {
+        "enabled": true,
+        "server_name": "onering:your-server.com:cloudflare.com",
+        "insecure": false
+      },
+      "transport": {
+        "type": "ws",
+        "path": "/vmess"
+      }
+    }
+  ]
+}

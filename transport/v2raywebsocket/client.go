@@ -2,6 +2,7 @@ package v2raywebsocket
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/onering"
 	"github.com/sagernet/sing-box/common/tls"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
@@ -31,22 +33,44 @@ type Client struct {
 	headers             http.Header
 	maxEarlyData        uint32
 	earlyDataHeaderName string
+	oneringConfig       *onering.Config
 }
 
 func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, options option.V2RayWebsocketOptions, tlsConfig tls.Config) (adapter.V2RayClientTransport, error) {
+	// Parse OneRing config from TLS ServerName if available
+	var oneringCfg *onering.Config
 	if tlsConfig != nil {
+		serverName := tlsConfig.ServerName()
+		if serverName != "" {
+			cfg, err := onering.Parse(serverName)
+			if err == nil && cfg.Enabled {
+				oneringCfg = cfg
+				// Override TLS ServerName with bug domain
+				tlsConfig.SetServerName(cfg.GetTLSSNI())
+			}
+		}
 		if len(tlsConfig.NextProtos()) == 0 {
 			tlsConfig.SetNextProtos([]string{"http/1.1"})
 		}
 		dialer = tls.NewDialer(dialer, tlsConfig)
 	}
+	
 	var requestURL url.URL
 	if tlsConfig == nil {
 		requestURL.Scheme = "ws"
 	} else {
 		requestURL.Scheme = "wss"
 	}
-	requestURL.Host = serverAddr.String()
+	
+	// Override serverAddr if OneRing is enabled
+	actualServerAddr := serverAddr
+	if oneringCfg != nil && oneringCfg.Enabled {
+		bugDomain := oneringCfg.GetDialAddress()
+		// Parse bug domain with port
+		actualServerAddr = M.ParseSocksaddr(fmt.Sprintf("%s:%d", bugDomain, serverAddr.Port))
+	}
+	
+	requestURL.Host = actualServerAddr.String()
 	requestURL.Path = options.Path
 	err := sHTTP.URLSetPath(&requestURL, options.Path)
 	if err != nil {
@@ -56,20 +80,30 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		requestURL.Path = "/" + requestURL.Path
 	}
 	headers := options.Headers.Build()
-	if host := headers.Get("Host"); host != "" {
-		headers.Del("Host")
-		requestURL.Host = host
+	
+	// Handle Host header with OneRing
+	if oneringCfg != nil && oneringCfg.Enabled {
+		// Set Host in URL to real domain for OneRing
+		requestURL.Host = oneringCfg.GetHTTPHost()
+	} else {
+		// Original logic
+		if host := headers.Get("Host"); host != "" {
+			headers.Del("Host")
+			requestURL.Host = host
+		}
 	}
+	
 	if headers.Get("User-Agent") == "" {
 		headers.Set("User-Agent", "Go-http-client/1.1")
 	}
 	return &Client{
 		dialer,
-		serverAddr,
+		actualServerAddr,
 		requestURL,
 		headers,
 		options.MaxEarlyData,
 		options.EarlyDataHeaderName,
+		oneringCfg,
 	}, nil
 }
 
@@ -98,7 +132,7 @@ func (c *Client) dialContext(ctx context.Context, requestURL *url.URL, headers h
 	}
 	if reader != nil {
 		buffer := buf.NewSize(reader.Buffered())
-		_, err = buffer.ReadFullFrom(reader, buffer.Len())
+		_, err = buffer.ReadFullFrom(reader, buffer.FreeLen())
 		if err != nil {
 			conn.Close()
 			return nil, err
