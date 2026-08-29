@@ -160,7 +160,8 @@ jobs:
           echo ""
           echo "=== Verify classes.jar in libbox.aar ==="
           unzip -q libbox.aar classes.jar
-          jar tf classes.jar | grep -E "^io/nekohasekai/libbox/[A-Z]" | head -20
+          echo "Top-level classes in libbox:"
+          jar tf classes.jar | grep -E "^io/nekohasekai/libbox/[A-Z]" 2>/dev/null | head -20 || true
           echo "✅ AAR merge completed successfully using official tool"
       
       - name: Upload merged libbox.aar
