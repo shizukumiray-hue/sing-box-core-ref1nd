@@ -48,46 +48,50 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22.10'
-          cache: true
+          go-version: '1.25.12'
+          cache: false
       
       - name: Setup Android NDK
+        id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r28
           add-to-path: true
       
+      - name: Setup OpenJDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      
       - name: Install gomobile
         run: |
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go get -tool golang.org/x/mobile/cmd/gobind
-          gomobile init
+          go install -v github.com/sagernet/gomobile/cmd/gomobile@v0.1.12
+          go install -v github.com/sagernet/gomobile/cmd/gobind@v0.1.12
       
       - name: Build libbox for ${{ matrix.name }}
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CC: ${{ matrix.ndk }}21-clang
-          CGO_ENABLED: 1
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          export PATH=$PATH:$(go env GOPATH)/bin
-          gomobile bind -v \
-            -androidapi 21 \
-            -target=android/${{ matrix.goarch }} \
-            -tags with_gvisor,with_quic,with_wireguard,with_utls,with_naive_outbound,with_clash_api,with_tailscale,ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird,tfogo_checklinkname0 \
-            -o libbox-${{ matrix.name }}.aar \
-            github.com/sagernet/sing-box/experimental/libbox
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          go run ./cmd/internal/build_libbox -target android -platform android/${{ matrix.goarch }}
+          mkdir -p dist/${{ matrix.goarch }}
+          mv libbox.aar libbox-${{ matrix.name }}.aar
+          mv libbox-legacy.aar libbox-legacy-${{ matrix.name }}.aar
+          cp libbox-${{ matrix.name }}.aar libbox-legacy-${{ matrix.name }}.aar dist/${{ matrix.goarch }}/
       
       - name: Verify AAR
         run: |
-          ls -lh libbox-${{ matrix.name }}.aar
-          unzip -l libbox-${{ matrix.name }}.aar | head -20
+          ls -lh dist/${{ matrix.goarch }}/
+          unzip -l dist/${{ matrix.goarch }}/libbox-${{ matrix.name }}.aar | head -20
+          echo "---"
+          unzip -l dist/${{ matrix.goarch }}/libbox-legacy-${{ matrix.name }}.aar | head -20
       
       - name: Upload libbox-${{ matrix.name }}.aar
         uses: actions/upload-artifact@v4
         with:
-          name: libbox-${{ matrix.name }}
-          path: libbox-${{ matrix.name }}.aar
+          name: libbox-${{ matrix.goarch }}
+          path: dist/${{ matrix.goarch }}/
           retention-days: 7
   
   merge-aar:
@@ -108,9 +112,9 @@ jobs:
       
       - name: Merge multi-arch AAR
         run: |
-          mkdir -p merged/jni
+          mkdir -p merged/jni merged-legacy/jni
           
-          # Copy JNI libs from all architectures
+          # Merge main variant (libbox.aar)
           for arch in arm64 arm amd64 386; do
             echo "Processing libbox-${arch}.aar..."
             unzip -q artifacts/libbox-${arch}/libbox-${arch}.aar -d temp-${arch}
@@ -131,35 +135,69 @@ jobs:
             rm -rf temp-${arch}
           done
           
+          # Merge legacy variant (libbox-legacy.aar)
+          for arch in arm64 arm amd64 386; do
+            echo "Processing libbox-legacy-${arch}.aar..."
+            unzip -q artifacts/libbox-${arch}/libbox-legacy-${arch}.aar -d temp-legacy-${arch}
+            
+            # Copy JNI libs with correct structure
+            if [ -d "temp-legacy-${arch}/jni" ]; then
+              cp -rv temp-legacy-${arch}/jni/* merged-legacy/jni/
+            fi
+            
+            # Copy classes.jar from first arch (they're identical)
+            if [ "$arch" = "arm64" ]; then
+              cp temp-legacy-${arch}/classes.jar merged-legacy/
+              cp temp-legacy-${arch}/AndroidManifest.xml merged-legacy/
+              [ -f temp-legacy-${arch}/R.txt ] && cp temp-legacy-${arch}/R.txt merged-legacy/
+              [ -f temp-legacy-${arch}/proguard.txt ] && cp temp-legacy-${arch}/proguard.txt merged-legacy/
+            fi
+            
+            rm -rf temp-legacy-${arch}
+          done
+          
           # List merged structure
-          echo "Merged AAR structure:"
+          echo "Merged libbox.aar structure:"
           find merged -type f
+          echo "---"
+          echo "Merged libbox-legacy.aar structure:"
+          find merged-legacy -type f
           
-          # Package merged AAR
-          cd merged
-          zip -r ../libbox.aar .
-          cd ..
+          # Package merged AARs
+          cd merged && zip -r ../libbox.aar . && cd ..
+          cd merged-legacy && zip -r ../libbox-legacy.aar . && cd ..
           
-          ls -lh libbox.aar
+          ls -lh libbox.aar libbox-legacy.aar
+          echo "---"
           unzip -l libbox.aar
+          echo "---"
+          unzip -l libbox-legacy.aar
       
       - name: Upload merged libbox.aar
         uses: actions/upload-artifact@v4
         with:
           name: libbox-merged
-          path: libbox.aar
+          path: |
+            libbox.aar
+            libbox-legacy.aar
           retention-days: 30
       
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: libbox.aar
+          files: |
+            libbox.aar
+            libbox-legacy.aar
           tag_name: ${{ github.ref_name }}
           body: |
             ## libbox.aar with OneRing Support
             
             Built from commit: ${{ github.sha }}
+            
+            ### Variants
+            - **libbox.aar**: Main variant (API 23+) with all features including naive_outbound
+            - **libbox-legacy.aar**: Legacy variant (API 21+) without naive_outbound
             
             ### Features
             - ✅ OneRing bypass technique
