@@ -99,9 +99,21 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+      - name: Checkout sing-box (for merge_aar tool)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.12'
+          cache: false
+      
       - name: Download all AAR artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: libbox-*
           path: artifacts
       
       - name: Setup Java
@@ -110,68 +122,46 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
       
-      - name: Merge multi-arch AAR
+      - name: Merge multi-arch AAR using official tool
         run: |
-          mkdir -p merged/jni merged-legacy/jni
+          set -euo pipefail
+          
+          echo "=== Using official merge_aar tool ==="
           
           # Merge main variant (libbox.aar)
-          for arch in arm64 arm amd64 386; do
-            echo "Processing libbox-${arch}.aar..."
-            unzip -q artifacts/libbox-${arch}/libbox-${arch}.aar -d temp-${arch}
-            
-            # Copy JNI libs with correct structure
-            if [ -d "temp-${arch}/jni" ]; then
-              cp -rv temp-${arch}/jni/* merged/jni/
-            fi
-            
-            # Copy classes.jar from first arch (they're identical)
-            if [ "$arch" = "arm64" ]; then
-              cp temp-${arch}/classes.jar merged/
-              cp temp-${arch}/AndroidManifest.xml merged/
-              [ -f temp-${arch}/R.txt ] && cp temp-${arch}/R.txt merged/
-              [ -f temp-${arch}/proguard.txt ] && cp temp-${arch}/proguard.txt merged/
-            fi
-            
-            rm -rf temp-${arch}
-          done
+          echo "Merging libbox.aar from all architectures..."
+          go run ./cmd/internal/merge_aar \
+            -output libbox.aar \
+            artifacts/libbox-386/libbox-386.aar \
+            artifacts/libbox-amd64/libbox-amd64.aar \
+            artifacts/libbox-arm/libbox-arm.aar \
+            artifacts/libbox-arm64/libbox-arm64.aar
           
           # Merge legacy variant (libbox-legacy.aar)
-          for arch in arm64 arm amd64 386; do
-            echo "Processing libbox-legacy-${arch}.aar..."
-            unzip -q artifacts/libbox-${arch}/libbox-legacy-${arch}.aar -d temp-legacy-${arch}
-            
-            # Copy JNI libs with correct structure
-            if [ -d "temp-legacy-${arch}/jni" ]; then
-              cp -rv temp-legacy-${arch}/jni/* merged-legacy/jni/
-            fi
-            
-            # Copy classes.jar from first arch (they're identical)
-            if [ "$arch" = "arm64" ]; then
-              cp temp-legacy-${arch}/classes.jar merged-legacy/
-              cp temp-legacy-${arch}/AndroidManifest.xml merged-legacy/
-              [ -f temp-legacy-${arch}/R.txt ] && cp temp-legacy-${arch}/R.txt merged-legacy/
-              [ -f temp-legacy-${arch}/proguard.txt ] && cp temp-legacy-${arch}/proguard.txt merged-legacy/
-            fi
-            
-            rm -rf temp-legacy-${arch}
-          done
+          echo "Merging libbox-legacy.aar from all architectures..."
+          go run ./cmd/internal/merge_aar \
+            -output libbox-legacy.aar \
+            artifacts/libbox-386/libbox-legacy-386.aar \
+            artifacts/libbox-amd64/libbox-legacy-amd64.aar \
+            artifacts/libbox-arm/libbox-legacy-arm.aar \
+            artifacts/libbox-arm64/libbox-legacy-arm64.aar
           
-          # List merged structure
-          echo "Merged libbox.aar structure:"
-          find merged -type f
-          echo "---"
-          echo "Merged libbox-legacy.aar structure:"
-          find merged-legacy -type f
-          
-          # Package merged AARs
-          cd merged && zip -r ../libbox.aar . && cd ..
-          cd merged-legacy && zip -r ../libbox-legacy.aar . && cd ..
-          
+          echo "=== Merged AAR files ==="
           ls -lh libbox.aar libbox-legacy.aar
-          echo "---"
-          unzip -l libbox.aar
-          echo "---"
-          unzip -l libbox-legacy.aar
+          
+          echo ""
+          echo "=== Verify libbox.aar structure ==="
+          unzip -l libbox.aar | head -30
+          
+          echo ""
+          echo "=== Verify libbox-legacy.aar structure ==="
+          unzip -l libbox-legacy.aar | head -30
+          
+          echo ""
+          echo "=== Verify classes.jar in libbox.aar ==="
+          unzip -q libbox.aar classes.jar
+          jar tf classes.jar | grep -E "^io/nekohasekai/libbox/[A-Z]" | head -20
+          echo "✅ AAR merge completed successfully using official tool"
       
       - name: Upload merged libbox.aar
         uses: actions/upload-artifact@v4
