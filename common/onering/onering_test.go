@@ -1,6 +1,7 @@
 package onering
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -73,6 +74,52 @@ func TestParse(t *testing.T) {
 		{
 			name:    "invalid chars - tab",
 			input:   "onering:real\t.com:bug.com",
+			wantErr: true,
+		},
+		// BUG FIX #2: Domain validation tests
+		{
+			name:    "invalid domain - spaces",
+			input:   "onering:my domain.com:bug.com",
+			wantErr: true,
+		},
+		{
+			name:    "invalid domain - double dots",
+			input:   "onering:domain..com:bug.com",
+			wantErr: true,
+		},
+		{
+			name:    "invalid domain - leading hyphen",
+			input:   "onering:-domain.com:bug.com",
+			wantErr: true,
+		},
+		{
+			name:    "invalid domain - trailing hyphen",
+			input:   "onering:domain-.com:bug.com",
+			wantErr: true,
+		},
+		// REVIEWER FIX #1: Port validation tests
+		// NOTE: Current parser limitation - ports in domain specification would create >2 parts
+		// Port validation in isValidDomain() is defensive for future enhancements
+		// These tests verify the parser correctly rejects malformed formats
+		{
+			name:    "parser rejects 3+ parts",
+			input:   "onering:real.com:bug.com:8443",
+			wantErr: true, // Rejected: 3 parts instead of 2
+		},
+		// REVIEWER FIX #2: IPv6 rejection tests (currently not supported)
+		{
+			name:    "invalid - IPv6 address not supported",
+			input:   "onering:2001:db8::1:bug.com",
+			wantErr: true,
+		},
+		{
+			name:    "invalid - bracketed IPv6 not supported",
+			input:   "onering:[2001:db8::1]:bug.com",
+			wantErr: true,
+		},
+		{
+			name:    "invalid - IPv6 with port not supported",
+			input:   "onering:[2001:db8::1]:8443:bug.com",
 			wantErr: true,
 		},
 	}
@@ -211,5 +258,47 @@ func TestConfig_GetHTTPHost(t *testing.T) {
 				t.Errorf("Config.GetHTTPHost() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+
+// BUG FIX #4: Test input length limit
+func TestInputLengthLimit(t *testing.T) {
+	// Create input longer than MaxInputLength
+	longInput := "onering:" + strings.Repeat("a", MaxInputLength)
+	
+	cfg, err := Parse(longInput)
+	if err == nil {
+		t.Error("Expected error for input exceeding MaxInputLength")
+	}
+	if cfg != nil {
+		t.Error("Expected nil config for oversized input")
+	}
+	if err != nil && !strings.Contains(err.Error(), "too long") {
+		t.Errorf("Expected 'too long' error, got: %v", err)
+	}
+}
+
+// BUG FIX #5: Test thread safety
+func TestThreadSafety(t *testing.T) {
+	cfg, err := Parse("onering:real.com:bug.com")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	// Run concurrent reads to test RWMutex
+	done := make(chan bool)
+	for i := 0; i < 100; i++ {
+		go func() {
+			_ = cfg.GetDialAddress()
+			_ = cfg.GetTLSSNI()
+			_ = cfg.GetHTTPHost()
+			_ = cfg.String()
+			done <- true
+		}()
+	}
+
+	for i := 0; i < 100; i++ {
+		<-done
 	}
 }
