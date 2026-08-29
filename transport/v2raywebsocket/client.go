@@ -70,7 +70,8 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		actualServerAddr = M.ParseSocksaddr(fmt.Sprintf("%s:%d", bugDomain, serverAddr.Port))
 	}
 	
-	requestURL.Host = actualServerAddr.String()
+	// Set initial requestURL.Host (will be overridden later for OneRing)
+	requestURL.Host = serverAddr.String()
 	requestURL.Path = options.Path
 	err := sHTTP.URLSetPath(&requestURL, options.Path)
 	if err != nil {
@@ -108,6 +109,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 }
 
 func (c *Client) dialContext(ctx context.Context, requestURL *url.URL, headers http.Header) (*WebsocketConn, error) {
+	// Use serverAddr which already contains bug domain if OneRing is enabled
 	conn, err := c.dialer.DialContext(ctx, N.NetworkTCP, c.serverAddr)
 	if err != nil {
 		return nil, err
