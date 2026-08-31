@@ -1,14 +1,6 @@
 name: Build libbox.aar with OneRing
 
 on:
-  push:
-    branches: [ reF1nd-stable ]
-    paths:
-      - 'common/onering/**'
-      - 'transport/v2raywebsocket/**'
-      - 'transport/v2rayhttpupgrade/**'
-      - 'experimental/libbox/**'
-      - '.github/workflows/build-libbox-onering.yml'
   workflow_dispatch:
 
 jobs:
